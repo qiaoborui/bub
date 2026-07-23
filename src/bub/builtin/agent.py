@@ -97,6 +97,8 @@ class Agent:
                 StreamEvent("final", {"text": "error: empty prompt", "ok": False}),
             ])
 
+        if allowed_tools is None and isinstance(runtime_allowed_tools := state.get("_runtime_allowed_tools"), list):
+            allowed_tools = runtime_allowed_tools
         state.setdefault("session_id", session_id)
         tape = self.tape.session_tape(
             session_id, workspace_from_state(state), context=replace(self.tape.context, state=state)

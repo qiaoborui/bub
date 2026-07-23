@@ -380,6 +380,26 @@ async def test_agent_run_rejects_unknown_allowed_tools() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_run_uses_runtime_allowed_tools_from_state() -> None:
+    agent = _make_agent()
+    fork_capture = _ForkCapture()
+    fake_tapes = _FakeTapeFactory(fork_capture)
+    agent.tape = fake_tapes  # type: ignore[assignment]
+
+    stream = await agent.run_stream(
+        session_id="user/s1",
+        prompt="describe this image",
+        state={"_runtime_workspace": "/tmp", "_runtime_allowed_tools": []},  # noqa: S108
+    )
+    [event async for event in stream]
+
+    completion_kwargs = _model_runner(agent).completion_kwargs
+    assert completion_kwargs is not None
+    assert completion_kwargs["tools"] == []
+    assert "<available_tools>" not in completion_kwargs["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
 async def test_run_command_model_switches_session_model_directly() -> None:
     """,model <model_id> runs the `model` builtin as a chat command with no LLM call.
 
