@@ -206,13 +206,7 @@ class Agent:
         auto_handoff_remaining = MAX_AUTO_HANDOFF_RETRIES
         display_model = model or self.settings.model
         next_prompt = prompt
-        runtime_max_steps = tape.context.state.get("_runtime_max_steps")
-        max_steps = (
-            runtime_max_steps
-            if isinstance(runtime_max_steps, int) and not isinstance(runtime_max_steps, bool) and runtime_max_steps > 0
-            else self.settings.max_steps
-        )
-        for step in range(1, max_steps + 1):
+        for step in range(1, self.settings.max_steps + 1):
             start = time.monotonic()
             should_continue = False
             logger.info("loop.step step={} tape={} model={}", step, tape.name, display_model)
@@ -307,7 +301,7 @@ class Agent:
                 },
             )
 
-        raise RuntimeError(f"max_steps_reached={max_steps}")
+        raise RuntimeError(f"max_steps_reached={self.settings.max_steps}")
 
     def _load_skills_prompt(self, prompt: str, workspace: Path, allowed_skills: set[str] | None = None) -> str:
         skill_index = {
