@@ -3,13 +3,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import AsyncGenerator, Callable
+import secrets
+from collections.abc import AsyncGenerator, AsyncIterable, Callable
 from typing import Any, ClassVar
 
 from loguru import logger
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 from telegram import Bot, Message, Update
+from telegram.constants import MessageLimit
+from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes, filters
 from telegram.ext import MessageHandler as TelegramMessageHandler
 from telegram.request import HTTPXRequest
@@ -19,6 +22,7 @@ from bub.channels.base import Channel
 from bub.channels.contracts import MessageHandler
 from bub.channels.message import ChannelMessage, MediaItem, MediaType
 from bub.configure import Settings, ensure_config
+from bub.streaming import StreamEvent
 from bub.utils import exclude_none
 
 
@@ -37,9 +41,44 @@ class TelegramSettings(Settings):
         default=None,
         description="Optional proxy URL for connecting to Telegram API, e.g. 'http://user:pass@host:port' or 'socks5://host:port'.",
     )
+    stream_update_interval: float = Field(
+        default=0.5,
+        ge=0.1,
+        description="Minimum seconds between Telegram sendMessageDraft updates.",
+    )
 
 
 NO_ACCESS_MESSAGE = "You are not allowed to chat with me. Please deploy your own instance of Bub."
+TELEGRAM_TEXT_LIMIT = int(MessageLimit.MAX_TEXT_LENGTH)
+
+
+def _draft_preview(text: str) -> str:
+    if len(text) <= TELEGRAM_TEXT_LIMIT:
+        return text
+    return "…" + text[-(TELEGRAM_TEXT_LIMIT - 1) :]
+
+
+def _split_text(text: str) -> list[str]:
+    return [text[offset : offset + TELEGRAM_TEXT_LIMIT] for offset in range(0, len(text), TELEGRAM_TEXT_LIMIT)]
+
+
+def _telegram_text(content: str) -> str:
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return content
+    if not isinstance(data, dict):
+        return content
+    message = data.get("message", "")
+    return message if isinstance(message, str) else str(message)
+
+
+async def _render_draft_preview(message: ChannelMessage, value: str) -> str | None:
+    rendered = await message.stream_renderer(value) if message.stream_renderer is not None else value
+    if rendered is None:
+        return None
+    preview = _draft_preview(_telegram_text(rendered))
+    return preview if preview.strip() else None
 
 
 def _message_type(message: Message) -> str:
@@ -165,6 +204,17 @@ class TelegramChannel(Channel):
     def needs_debounce(self) -> bool:
         return True
 
+    def prepare_stream_output(self, message: ChannelMessage) -> bool:
+        if (
+            message.kind != "normal"
+            or message.output_channel != "null"
+            or message.context.get("chat_type") != "private"
+        ):
+            return False
+        message.output_channel = self.name
+        message.set_response_mode("direct_stream")
+        return True
+
     async def start(self, stop_event: asyncio.Event) -> None:
         proxy = self._settings.proxy
         logger.info(
@@ -205,15 +255,57 @@ class TelegramChannel(Channel):
 
     async def send(self, message: ChannelMessage) -> None:
         chat_id = message.chat_id
-        content = message.content
-        try:
-            data = json.loads(content)
-            text = data.get("message", "")
-        except json.JSONDecodeError:
-            text = content
+        text = _telegram_text(message.content)
         if not text.strip():
             return
-        await self._app.bot.send_message(chat_id=chat_id, text=text)
+        for chunk in _split_text(text):
+            await self._app.bot.send_message(chat_id=chat_id, text=chunk)
+
+    def stream_events(self, message: ChannelMessage, stream: AsyncIterable[StreamEvent]) -> AsyncIterable[StreamEvent]:
+        if message.context.get("chat_type") != "private":
+            return stream
+        return self._stream_private_drafts(message, stream)
+
+    async def _stream_private_drafts(
+        self, message: ChannelMessage, stream: AsyncIterable[StreamEvent]
+    ) -> AsyncGenerator[StreamEvent, None]:
+        draft_id = secrets.randbelow(2**31 - 1) + 1
+        chat_id = int(message.chat_id)
+        text = ""
+        last_preview: str | None = None
+        last_update = float("-inf")
+        draft_enabled = True
+        loop = asyncio.get_running_loop()
+
+        async def update_draft(value: str) -> None:
+            nonlocal draft_enabled, last_preview, last_update
+            if not draft_enabled:
+                return
+            try:
+                preview = await _render_draft_preview(message, value)
+            except Exception as exc:
+                draft_enabled = False
+                logger.warning("telegram.draft renderer disabled chat_id={} error={}", chat_id, exc)
+                return
+            if preview is None or preview == last_preview:
+                return
+            try:
+                await self._app.bot.send_message_draft(chat_id=chat_id, draft_id=draft_id, text=preview)
+            except TelegramError as exc:
+                draft_enabled = False
+                logger.warning("telegram.draft disabled chat_id={} error={}", chat_id, exc)
+                return
+            last_preview = preview
+            last_update = loop.time()
+
+        async for event in stream:
+            if event.kind == "text":
+                text += str(event.data.get("delta", ""))
+                if loop.time() - last_update >= self._settings.stream_update_interval:
+                    await update_draft(text)
+            elif event.kind == "final":
+                await update_draft(text)
+            yield event
 
     async def _on_start(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
@@ -257,11 +349,13 @@ class TelegramChannel(Channel):
             media_items.extend(reply_media)
         content = json.dumps({"message": content, **metadata}, ensure_ascii=False)
         is_active = MESSAGE_FILTER.filter(message) is not False
+        chat_type = getattr(getattr(message, "chat", None), "type", None)
         return ChannelMessage(
             session_id=session_id,
             channel=self.name,
             chat_id=chat_id,
             content=content,
+            context=exclude_none({"chat_type": chat_type}),
             media=media_items,
             is_active=is_active,
             lifespan=self.start_typing(chat_id),

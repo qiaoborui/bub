@@ -81,9 +81,13 @@ Telegram channel 设置 `needs_debounce=True`。入站消息按 session 用 `BUB
 逗号命令（`,help`、`,fs.read ...`）始终绕过防抖。无论是否有待处理批次，它们一到达就被分发。
 :::
 
-## 7. 出站行为
+## 7. 出站行为与流式输出
 
 普通 Telegram 入站消息进入 turn pipeline 前会设置 `output_channel="null"`。这会阻止普通模型返回值被盲目发回 Telegram。内置 `telegram` skill 是回复、进度更新和编辑消息的标准路径。
+
+设置 `BUB_STREAM_OUTPUT=true` 后启用模型直接流式输出。私聊中，Bub 使用 Telegram Bot API 的 `sendMessageDraft`，在同一条回复中保持稳定且非零的 draft id，通过 `BUB_TELEGRAM_STREAM_UPDATE_INTERVAL` 控制更新频率，并在流结束后发送持久化的完整消息。Telegram 当前为私聊提供 message draft，群聊会收到持久化的最终消息。
+
+符合条件的私聊消息会进入 typed `direct_stream` 响应模式，内置 prompt 会要求模型直接返回面向用户的答案。Channel skill 继续用于附件、主动消息、编辑和更丰富的 channel 专属操作；群聊与其他消息类型继续使用标准 skill 回复路径。
 
 逗号命令不同：它们保留 `output_channel="telegram"`，因此工具输出会发回原 `chat_id`。当路由到 `TelegramChannel.send(...)` 的内容是带 `"message"` 字段的 JSON 时，只发送该字段；否则发送原始内容。空载荷被丢弃。
 

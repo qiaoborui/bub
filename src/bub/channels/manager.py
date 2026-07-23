@@ -304,6 +304,8 @@ class ChannelManager:
         return state
 
     async def _run_message(self, message: ChannelMessage) -> None:
+        if self._stream_output and (channel := self.get_channel(message.channel)) is not None:
+            channel.prepare_stream_output(message)
         result = await self.framework.process_inbound(message, self._stream_output)
         state = getattr(result, "state", {"session_id": message.session_id})
         await self._promote_steering_to_pending(message.session_id, state)

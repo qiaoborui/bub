@@ -107,6 +107,7 @@ class TelegramSettings(Settings):
     allow_users: str | None = None
     allow_chats: str | None = None
     proxy: str | None = None
+    stream_update_interval: float = 0.5
 ```
 
 加载到 YAML 的 `telegram:` 段。
@@ -117,6 +118,7 @@ class TelegramSettings(Settings):
 | `BUB_TELEGRAM_ALLOW_USERS` | unset | `allow_users` | 逗号分隔的允许 Telegram 用户 ID 列表。留空表示不限制。 |
 | `BUB_TELEGRAM_ALLOW_CHATS` | unset | `allow_chats` | 逗号分隔的允许 Telegram chat ID 列表。留空表示不限制。 |
 | `BUB_TELEGRAM_PROXY` | unset | `proxy` | 访问 Telegram API 的代理 URL,例如 `http://user:pass@host:port` 或 `socks5://host:port`。 |
+| `BUB_TELEGRAM_STREAM_UPDATE_INTERVAL` | `0.5` | `stream_update_interval` | `BUB_STREAM_OUTPUT=true` 时，私聊 `sendMessageDraft` 两次更新之间的最小秒数。 |
 
 部署细节见 [运维 › Channels › Telegram](/zh-cn/docs/operate/channels/telegram/)。
 

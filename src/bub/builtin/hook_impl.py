@@ -46,10 +46,11 @@ Before ending this run, you MUST determine whether a response needs to be sent v
 2. Is there any error or important information that needs to be sent to the user immediately?
 3. If it is a casual chat, does the conversation need to be continued?
 
-**IMPORTANT:** Your plain/direct reply in this chat will be ignored.
-**Therefore, you MUST send messages via channel using the correct skill if a response is needed.**
+When the message metadata contains `response_mode=direct_stream`, write the user-facing answer directly in your response.
+The runtime streams that response through the active channel and persists the final text. Use the channel skill only for
+attachments, proactive messages, edits, or other channel-specific features.
 
-When responding to a channel message, you MUST:
+For other channel messages, your plain/direct reply is ignored. When responding, you MUST:
 1. Identify the channel from the message metadata (e.g., `$telegram`, `$discord`)
 2. Send your message as instructed by the channel skill (e.g., `telegram` skill for `$telegram` channel)
 </response_instruct>

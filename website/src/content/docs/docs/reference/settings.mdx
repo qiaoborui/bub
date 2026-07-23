@@ -107,6 +107,7 @@ class TelegramSettings(Settings):
     allow_users: str | None = None
     allow_chats: str | None = None
     proxy: str | None = None
+    stream_update_interval: float = 0.5
 ```
 
 Loaded under the YAML `telegram:` section.
@@ -117,6 +118,7 @@ Loaded under the YAML `telegram:` section.
 | `BUB_TELEGRAM_ALLOW_USERS` | unset | `allow_users` | Comma-separated allowlist of Telegram user IDs. Empty means no restriction. |
 | `BUB_TELEGRAM_ALLOW_CHATS` | unset | `allow_chats` | Comma-separated allowlist of Telegram chat IDs. Empty means no restriction. |
 | `BUB_TELEGRAM_PROXY` | unset | `proxy` | Proxy URL for the Telegram API, e.g. `http://user:pass@host:port` or `socks5://host:port`. |
+| `BUB_TELEGRAM_STREAM_UPDATE_INTERVAL` | `0.5` | `stream_update_interval` | Minimum seconds between private-chat `sendMessageDraft` updates when `BUB_STREAM_OUTPUT=true`. |
 
 See [Operate › Channels › Telegram](/docs/operate/channels/telegram/) for deployment notes.
 

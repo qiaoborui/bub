@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import pty
 import re
@@ -74,9 +75,10 @@ def _plain_terminal_text(raw: bytes) -> str:
 
 
 class _FakeChannelMixin:
-    def __init__(self, name: str, *, needs_debounce: bool = False) -> None:
+    def __init__(self, name: str, *, needs_debounce: bool = False, supports_stream_output: bool = False) -> None:
         self.name = name
         self._needs_debounce = needs_debounce
+        self._supports_stream_output = supports_stream_output
         self.sent: list[ChannelMessage] = []
         self.started = False
         self.stopped = False
@@ -94,6 +96,13 @@ class _FakeChannelMixin:
 
     @property
     def enabled(self) -> bool:
+        return True
+
+    def prepare_stream_output(self, message: ChannelMessage) -> bool:
+        if not self._supports_stream_output:
+            return False
+        message.output_channel = self.name
+        message.set_response_mode("direct_stream")
         return True
 
     async def send(self, message: ChannelMessage) -> None:
@@ -584,6 +593,41 @@ async def test_channel_manager_listen_and_run_passes_stream_output_setting(
     assert stream_output is True
     assert framework.running_entries == 1
     assert framework.running_exits == 1
+
+
+@pytest.mark.asyncio
+async def test_channel_manager_enables_direct_output_for_stream_capable_channel(load_config) -> None:
+    _load_channel_config(load_config, enabled_channels="telegram", stream_output=True)
+    telegram = FakeChannel("telegram", supports_stream_output=True)
+    framework = FakeFramework({"telegram": telegram})
+    manager = ChannelManager(framework)
+    message = _message("hello")
+    message.output_channel = "null"
+
+    await manager._run_message(message)
+
+    assert message.output_channel == "telegram"
+    assert message.response_mode == "direct_stream"
+    assert message.context["response_mode"] == "direct_stream"
+    assert framework.process_calls == [(message, True)]
+
+
+def test_telegram_channel_prepares_stream_output_only_for_private_normal_messages(load_config) -> None:
+    _load_channel_config(load_config, telegram_value="test-token")
+    channel = TelegramChannel(lambda message: None)
+    private = _message("hello")
+    private.output_channel = "null"
+    private.context["chat_type"] = "private"
+    group = _message("hello", chat_id="-10042")
+    group.output_channel = "null"
+    group.context["chat_type"] = "group"
+
+    assert channel.prepare_stream_output(private) is True
+    assert private.output_channel == "telegram"
+    assert private.response_mode == "direct_stream"
+    assert channel.prepare_stream_output(group) is False
+    assert group.output_channel == "null"
+    assert group.response_mode is None
 
 
 @pytest.mark.asyncio
@@ -1155,8 +1199,163 @@ async def test_telegram_channel_send_extracts_json_message_and_skips_blank(load_
 
     await channel.send(_message('{"message":"hello"}', chat_id="42"))
     await channel.send(_message("   ", chat_id="42"))
+    await channel.send(_message("x" * 4097, chat_id="42"))
 
-    assert sent == [("42", "hello")]
+    assert sent == [("42", "hello"), ("42", "x" * 4096), ("42", "x")]
+
+
+@pytest.mark.asyncio
+async def test_telegram_channel_streams_private_chat_with_message_drafts(load_config) -> None:
+    _load_channel_config(load_config, telegram_value="test-token")
+    channel = TelegramChannel(lambda message: None)
+    channel._settings.stream_update_interval = 0
+    drafts: list[tuple[int, int, str]] = []
+
+    async def send_message_draft(chat_id: int, draft_id: int, text: str) -> bool:
+        drafts.append((chat_id, draft_id, text))
+        return True
+
+    channel._app = SimpleNamespace(bot=SimpleNamespace(send_message_draft=send_message_draft))
+    message = _message("ignored", chat_id="42")
+    message.context["chat_type"] = "private"
+
+    async def source():
+        yield StreamEvent("text", {"delta": "hel"})
+        yield StreamEvent("text", {"delta": "lo"})
+        yield StreamEvent("final", {"text": "hello"})
+
+    yielded = [event async for event in channel.stream_events(message, source())]
+
+    assert [event.kind for event in yielded] == ["text", "text", "final"]
+    assert [text for _, _, text in drafts] == ["hel", "hello"]
+    assert {chat_id for chat_id, _, _ in drafts} == {42}
+    assert len({draft_id for _, draft_id, _ in drafts}) == 1
+    assert drafts[0][1] > 0
+
+
+@pytest.mark.asyncio
+async def test_telegram_channel_throttles_drafts_and_flushes_final_text(load_config) -> None:
+    _load_channel_config(load_config, telegram_value="test-token")
+    channel = TelegramChannel(lambda message: None)
+    channel._settings.stream_update_interval = 3600
+    drafts: list[str] = []
+
+    async def send_message_draft(chat_id: int, draft_id: int, text: str) -> bool:
+        drafts.append(text)
+        return True
+
+    channel._app = SimpleNamespace(bot=SimpleNamespace(send_message_draft=send_message_draft))
+    message = _message("ignored", chat_id="42")
+    message.context["chat_type"] = "private"
+
+    async def source():
+        yield StreamEvent("text", {"delta": "hel"})
+        yield StreamEvent("text", {"delta": "lo"})
+        yield StreamEvent("final", {"text": "hello"})
+
+    _ = [event async for event in channel.stream_events(message, source())]
+
+    assert drafts == ["hel", "hello"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_channel_renders_drafts_through_outbound_policy(load_config) -> None:
+    _load_channel_config(load_config, telegram_value="test-token")
+    channel = TelegramChannel(lambda message: None)
+    channel._settings.stream_update_interval = 0
+    drafts: list[str] = []
+
+    async def send_message_draft(chat_id: int, draft_id: int, text: str) -> bool:
+        drafts.append(text)
+        return True
+
+    async def render(value: str) -> str:
+        return json.dumps({"message": value.replace("secret", "[redacted]")})
+
+    channel._app = SimpleNamespace(bot=SimpleNamespace(send_message_draft=send_message_draft))
+    message = _message("ignored", chat_id="42")
+    message.context["chat_type"] = "private"
+    message.stream_renderer = render
+
+    async def source():
+        yield StreamEvent("text", {"delta": "secret"})
+        yield StreamEvent("final", {"text": "secret"})
+
+    _ = [event async for event in channel.stream_events(message, source())]
+
+    assert drafts == ["[redacted]"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_channel_skips_drafts_suppressed_by_outbound_policy(load_config) -> None:
+    _load_channel_config(load_config, telegram_value="test-token")
+    channel = TelegramChannel(lambda message: None)
+    drafts: list[str] = []
+
+    async def send_message_draft(chat_id: int, draft_id: int, text: str) -> bool:
+        drafts.append(text)
+        return True
+
+    async def suppress(value: str) -> None:
+        return None
+
+    channel._app = SimpleNamespace(bot=SimpleNamespace(send_message_draft=send_message_draft))
+    message = _message("ignored", chat_id="42")
+    message.context["chat_type"] = "private"
+    message.stream_renderer = suppress
+
+    async def source():
+        yield StreamEvent("text", {"delta": "secret"})
+        yield StreamEvent("final", {"text": "secret"})
+
+    yielded = [event async for event in channel.stream_events(message, source())]
+
+    assert [event.kind for event in yielded] == ["text", "final"]
+    assert drafts == []
+
+
+@pytest.mark.asyncio
+async def test_telegram_channel_preserves_stream_when_outbound_renderer_fails(load_config) -> None:
+    _load_channel_config(load_config, telegram_value="test-token")
+    channel = TelegramChannel(lambda message: None)
+    drafts: list[str] = []
+
+    async def send_message_draft(chat_id: int, draft_id: int, text: str) -> bool:
+        drafts.append(text)
+        return True
+
+    async def fail(value: str) -> str:
+        raise RuntimeError("policy unavailable")
+
+    channel._app = SimpleNamespace(bot=SimpleNamespace(send_message_draft=send_message_draft))
+    message = _message("ignored", chat_id="42")
+    message.context["chat_type"] = "private"
+    message.stream_renderer = fail
+
+    async def source():
+        yield StreamEvent("text", {"delta": "hello"})
+        yield StreamEvent("final", {"text": "hello"})
+
+    yielded = [event async for event in channel.stream_events(message, source())]
+
+    assert [event.kind for event in yielded] == ["text", "final"]
+    assert drafts == []
+
+
+@pytest.mark.asyncio
+async def test_telegram_channel_skips_message_drafts_for_group_chat(load_config) -> None:
+    _load_channel_config(load_config, telegram_value="test-token")
+    channel = TelegramChannel(lambda message: None)
+    message = _message("ignored", chat_id="-10042")
+    message.context["chat_type"] = "group"
+
+    async def source():
+        yield StreamEvent("text", {"delta": "hello"})
+        yield StreamEvent("final", {"text": "hello"})
+
+    yielded = [event async for event in channel.stream_events(message, source())]
+
+    assert [event.kind for event in yielded] == ["text", "final"]
 
 
 @pytest.mark.asyncio
@@ -1204,12 +1403,13 @@ async def test_telegram_channel_build_message_wraps_payload_and_disables_outboun
     channel._parser = parser
     monkeypatch.setattr("bub.channels.telegram.MESSAGE_FILTER.filter", lambda message: True)
 
-    message = SimpleNamespace(chat_id=42)
+    message = SimpleNamespace(chat_id=42, chat=SimpleNamespace(type="private"))
 
     result = await channel._build_message(message)
 
     assert result.output_channel == "null"
     assert result.is_active is True
+    assert result.context["chat_type"] == "private"
     assert '"message": "hello"' in result.content
     assert '"reply_to_message"' in result.content
     assert result.lifespan is not None

@@ -355,6 +355,7 @@ async def test_process_inbound_streams_when_requested() -> None:  # noqa: C901
     framework = BubFramework()
     stream_calls: list[str] = []
     wrapped_events: list[str] = []
+    rendered_previews: list[str | None] = []
 
     class StreamingPlugin:
         @hookimpl
@@ -386,7 +387,7 @@ async def test_process_inbound_streams_when_requested() -> None:  # noqa: C901
 
         @hookimpl
         def render_outbound(self, message, session_id, state, model_output):
-            return [{"content": model_output, "channel": "cli", "chat_id": "room"}]
+            return [{"content": f"rendered:{model_output}", "channel": "cli", "chat_id": "room"}]
 
         @hookimpl
         async def dispatch_outbound(self, message) -> bool:
@@ -395,6 +396,8 @@ async def test_process_inbound_streams_when_requested() -> None:  # noqa: C901
     class RecordingRouter:
         def wrap_stream(self, message, stream):
             async def iterator():
+                assert message.stream_renderer is not None
+                rendered_previews.append(await message.stream_renderer("partial"))
                 async for event in stream:
                     wrapped_events.append(event.kind)
                     yield event
@@ -417,4 +420,6 @@ async def test_process_inbound_streams_when_requested() -> None:  # noqa: C901
 
     assert stream_calls == ["prompt"]
     assert wrapped_events == ["text", "text", "final"]
+    assert rendered_previews == ["rendered:partial"]
     assert result.model_output == "streamed"
+    assert result.outbounds[0]["content"] == "rendered:streamed"

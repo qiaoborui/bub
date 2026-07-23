@@ -16,6 +16,7 @@ from loguru import logger
 from bub import configure
 from bub.channels.admission import AdmitDecision, SteeringInbox, TurnSnapshot
 from bub.channels.contracts import ChannelRouter, MessageHandler
+from bub.channels.message import ChannelMessage
 from bub.envelope import Envelope, content_of, field_of, unpack_batch
 from bub.errors import BubError, ErrorKind
 from bub.hooks.interception import AgentHooks
@@ -201,18 +202,48 @@ class BubFramework:
             return prompt if isinstance(prompt, str) else content_of(inbound)
         else:
             parts: list[str] = []
-            events = self._channel_router.wrap_stream(inbound, stream) if self._channel_router is not None else stream
-            async for event in events:
-                if event.kind == "text":
-                    parts.append(str(event.data.get("delta", "")))
-                elif event.kind == "error":
-                    # Turn "kind" to enum type otherwise BubError's __str__ won't work well.
-                    data = {
-                        **event.data,
-                        "kind": ErrorKind(event.data.get("kind", "unknown")),
-                    }
-                    await self._hook_runtime.notify_error(stage="run_model", error=BubError(**data), message=inbound)
+            if isinstance(inbound, ChannelMessage):
+
+                async def render_stream(model_output: str) -> str | None:
+                    return await self._render_stream_output(inbound, session_id, state, model_output)
+
+                inbound.stream_renderer = render_stream
+            try:
+                events = (
+                    self._channel_router.wrap_stream(inbound, stream) if self._channel_router is not None else stream
+                )
+                async for event in events:
+                    if event.kind == "text":
+                        parts.append(str(event.data.get("delta", "")))
+                    elif event.kind == "error":
+                        # Turn "kind" to enum type otherwise BubError's __str__ won't work well.
+                        data = {
+                            **event.data,
+                            "kind": ErrorKind(event.data.get("kind", "unknown")),
+                        }
+                        await self._hook_runtime.notify_error(
+                            stage="run_model", error=BubError(**data), message=inbound
+                        )
+            finally:
+                if isinstance(inbound, ChannelMessage):
+                    inbound.stream_renderer = None
             return "".join(parts)
+
+    async def _render_stream_output(
+        self,
+        message: Envelope,
+        session_id: str,
+        state: dict[str, Any],
+        model_output: str,
+    ) -> str | None:
+        outbounds = await self._collect_outbounds(message, session_id, state, model_output)
+        output_channel = field_of(message, "output_channel", field_of(message, "channel"))
+        for outbound in outbounds:
+            outbound_channel = field_of(outbound, "output_channel", field_of(outbound, "channel"))
+            if outbound_channel == output_channel:
+                content = content_of(outbound)
+                return content if content.strip() else None
+        return None
 
     def hook_report(self) -> dict[str, list[str]]:
         """Return hook implementation summary for diagnostics."""

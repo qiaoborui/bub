@@ -30,7 +30,7 @@ dependencies = [
     "any-llm-sdk[anthropic]",
     "rich>=13.0.0",
     "prompt-toolkit>=3.0.0",
-    "python-telegram-bot>=21.0",
+    "python-telegram-bot>=22.7",
     "loguru>=0.7.2",
     "rapidfuzz>=3.14.3",
     "aiohttp>=3.13.3",

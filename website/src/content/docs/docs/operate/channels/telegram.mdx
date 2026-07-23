@@ -81,9 +81,13 @@ The Telegram channel sets `needs_debounce=True`. Inbound messages are batched pe
 Comma commands (`,help`, `,fs.read ...`) always bypass debounce. They are dispatched the moment they arrive, regardless of any pending batch.
 :::
 
-## 7. Outbound behavior
+## 7. Outbound behavior and streaming
 
 Normal Telegram inbound messages set `output_channel="null"` before they enter the turn pipeline. That prevents a plain model return value from being sent back blindly. The bundled `telegram` skill is the canonical path for replies, progress updates, and edits.
+
+Set `BUB_STREAM_OUTPUT=true` to enable direct model streaming. In private chats, Bub uses Telegram Bot API `sendMessageDraft` with one stable, non-zero draft id, throttles updates with `BUB_TELEGRAM_STREAM_UPDATE_INTERVAL`, and sends the completed text as a persistent message after the stream ends. Telegram currently exposes message drafts for private chats, so group chats receive the completed persistent message.
+
+Streaming mode marks eligible private-chat messages with the typed `direct_stream` response mode. The builtin prompt then asks the model to return its user-facing answer directly. Channel skills remain available for attachments, proactive messages, edits, and richer channel-specific operations. Group chats and other message kinds keep the standard skill-based response path.
 
 Comma commands are different: they keep `output_channel="telegram"`, so their tool output is sent back to the originating `chat_id`. If content routed to `TelegramChannel.send(...)` is JSON with a `"message"` field, only that field is sent; otherwise the raw content is sent. Empty payloads are dropped.
 

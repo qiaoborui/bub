@@ -32,6 +32,10 @@ class Channel(ABC):
         """Whether this channel is enabled. Default to True."""
         return True
 
+    def prepare_stream_output(self, message: ChannelMessage) -> bool:
+        """Prepare one inbound message for direct stream delivery when supported."""
+        return False
+
     async def send(self, message: ChannelMessage) -> None:
         """Send a message to the channel. Optional to implement."""
         # Do nothing by default

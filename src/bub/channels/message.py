@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 type MessageKind = Literal["error", "normal", "command"]
 type MediaType = Literal["image", "audio", "video", "document"]
+type ResponseMode = Literal["direct_stream"]
+type StreamRenderer = Callable[[str], Awaitable[str | None]]
 
 
 @dataclass
@@ -44,11 +46,19 @@ class ChannelMessage:
     media: list[MediaItem] = field(default_factory=list)
     lifespan: contextlib.AbstractAsyncContextManager | None = None
     output_channel: str = ""
+    response_mode: ResponseMode | None = None
+    stream_renderer: StreamRenderer | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.context.update({"channel": "$" + self.channel, "chat_id": self.chat_id})
+        if self.response_mode is not None:
+            self.context["response_mode"] = self.response_mode
         if not self.output_channel:  # output to the same channel by default
             self.output_channel = self.channel
+
+    def set_response_mode(self, response_mode: ResponseMode) -> None:
+        self.response_mode = response_mode
+        self.context["response_mode"] = response_mode
 
     @property
     def context_str(self) -> str:
