@@ -10,7 +10,7 @@ import pytest
 from bub.builtin.hook_impl import AGENTS_FILE_NAME, DEFAULT_SYSTEM_PROMPT, BuiltinImpl
 from bub.builtin.store import FileTapeStore
 from bub.builtin.tape import Tape
-from bub.channels.message import ChannelMessage
+from bub.channels.message import ChannelMessage, MediaItem
 from bub.framework import BubFramework
 from bub.streaming import AsyncStreamEvents, StreamEvent
 from bub.tape import AsyncTapeStoreAdapter, InMemoryTapeStore, TapeContext
@@ -152,6 +152,24 @@ async def test_load_state_does_not_inject_model_for_unknown_session(tmp_path: Pa
     state = await impl.load_state(message=message, session_id="fresh-session")
 
     assert "model" not in state
+
+
+@pytest.mark.asyncio
+async def test_load_state_routes_image_message_to_vision_model(tmp_path: Path) -> None:
+    _, impl, agent = _build_impl(tmp_path)
+    agent.settings.vision_model = "openai:gpt-5.4-mini"
+    message = ChannelMessage(
+        session_id="session",
+        channel="telegram",
+        chat_id="room",
+        content="describe this",
+        context={"model": "deepseek:deepseek-v4-flash"},
+        media=[MediaItem(type="image", mime_type="image/png")],
+    )
+
+    state = await impl.load_state(message=message, session_id="resolved-session")
+
+    assert state["model"] == "openai:gpt-5.4-mini"
 
 
 @pytest.mark.asyncio

@@ -126,7 +126,7 @@ class BuiltinImpl:
     @staticmethod
     def _configured_models() -> list[str]:
         settings = load_settings()
-        models = [settings.model, *(settings.fallback_models or [])]
+        models = [settings.model, settings.vision_model, *(settings.fallback_models or [])]
         return list(dict.fromkeys(model for model in models if model))
 
     @hookimpl
@@ -153,6 +153,11 @@ class BuiltinImpl:
             state["model"] = model
         if model := field_of(message, "context", {}).get("model"):
             state["model"] = model
+        media = field_of(message, "media") or []
+        if any(field_of(item, "type") == "image" for item in media) and (
+            vision_model := self._get_agent().settings.vision_model
+        ):
+            state["model"] = vision_model
         if thread_id := field_of(message, "context", {}).get("thread_id"):
             state["_runtime_thread_id"] = thread_id
         return state

@@ -59,6 +59,36 @@ def _stream_usage_options(llm: AnyLLM, *, stream: bool) -> dict[str, Any] | None
     return None
 
 
+def _omit_historical_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove image payloads when replaying history to a text-only model."""
+
+    result: list[dict[str, Any]] = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            result.append(message)
+            continue
+
+        remaining = [
+            part
+            for part in content
+            if not (isinstance(part, dict) and part.get("type") == "image_url")
+        ]
+        if len(remaining) == len(content):
+            result.append(message)
+            continue
+
+        updated = dict(message)
+        if remaining and all(isinstance(part, dict) and part.get("type") == "text" for part in remaining):
+            updated["content"] = "\n".join(str(part.get("text", "")) for part in remaining).strip()
+        elif remaining:
+            updated["content"] = remaining
+        else:
+            updated["content"] = "[Image omitted from history]"
+        result.append(updated)
+    return result
+
+
 class ModelRunner:
     def __init__(self, settings: AgentSettings, hooks: AgentHooks | None = None) -> None:
         self.settings = settings
@@ -279,6 +309,8 @@ class ModelRunner:
                 model=model,
             )
             raise
+        if self.settings.vision_model and model != self.settings.vision_model:
+            messages = _omit_historical_images(messages)
         steering_messages_native = [{"role": "user", "content": message} for message in (steering_messages or [])]
         if system_prompt:
             messages = [{"role": "system", "content": system_prompt}, *messages]

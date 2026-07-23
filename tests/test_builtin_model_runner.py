@@ -12,7 +12,7 @@ from any_llm.types.completion import ChatCompletionChunk
 from bub.builtin.model_runner import ModelRunner
 from bub.builtin.settings import AgentSettings, ModelCandidate
 from bub.builtin.tape import Tape
-from bub.tape import AsyncTapeStoreAdapter, InMemoryTapeStore, TapeContext
+from bub.tape import AsyncTapeStoreAdapter, InMemoryTapeStore, TapeContext, TapeEntry
 
 
 class _FakeStreamingOpenAIProvider(BaseOpenAIProvider):
@@ -93,3 +93,65 @@ async def test_streaming_openai_usage_is_requested_and_recorded_in_tape(tmp_path
         "prompt_tokens": 3,
         "total_tokens": 5,
     }
+
+
+@pytest.mark.asyncio
+async def test_build_messages_omits_historical_images_for_text_model(tmp_path: Path) -> None:
+    tape = Tape(tmp_path, AsyncTapeStoreAdapter(InMemoryTapeStore()), TapeContext()).scoped("test-tape")
+    await tape.ensure_bootstrap_anchor()
+    await tape.store.append(
+        tape.name,
+        TapeEntry.message({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "old image caption"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+            ],
+        }),
+    )
+    runner = ModelRunner(
+        AgentSettings.model_construct(
+            model="deepseek:deepseek-v4-flash",
+            vision_model="openai:gpt-5.4-mini",
+        )
+    )
+
+    messages, _ = await runner.build_messages(
+        tape=tape,
+        run_id="run-1",
+        system_prompt=None,
+        prompt="follow up",
+        model="deepseek:deepseek-v4-flash",
+    )
+
+    assert messages == [
+        {"role": "user", "content": "old image caption"},
+        {"role": "user", "content": "follow up"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_build_messages_keeps_historical_images_for_vision_model(tmp_path: Path) -> None:
+    image_content = [
+        {"type": "text", "text": "old image caption"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+    ]
+    tape = Tape(tmp_path, AsyncTapeStoreAdapter(InMemoryTapeStore()), TapeContext()).scoped("test-tape")
+    await tape.ensure_bootstrap_anchor()
+    await tape.store.append(tape.name, TapeEntry.message({"role": "user", "content": image_content}))
+    runner = ModelRunner(
+        AgentSettings.model_construct(
+            model="deepseek:deepseek-v4-flash",
+            vision_model="openai:gpt-5.4-mini",
+        )
+    )
+
+    messages, _ = await runner.build_messages(
+        tape=tape,
+        run_id="run-1",
+        system_prompt=None,
+        prompt="follow up",
+        model="openai:gpt-5.4-mini",
+    )
+
+    assert messages[0]["content"] == image_content
