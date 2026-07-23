@@ -14,6 +14,7 @@ from bub.builtin.model_runner import ModelRunner
 from bub.builtin.settings import AgentSettings
 from bub.builtin.steering import InMemorySteeringInbox
 from bub.errors import BubError
+from bub.streaming import AsyncStreamEvents, StreamEvent
 from bub.tape import TapeContext
 from bub.tools import REGISTRY, tool
 
@@ -377,6 +378,38 @@ async def test_agent_run_rejects_unknown_allowed_tools() -> None:
 
     with pytest.raises(ValueError, match="tests_missing_agent_tool"):
         [event async for event in stream]
+
+
+@pytest.mark.asyncio
+async def test_agent_run_honors_runtime_max_steps() -> None:
+    agent = _make_agent()
+    fork_capture = _ForkCapture()
+    agent.tape = _FakeTapeFactory(fork_capture)  # type: ignore[assignment]
+    calls = 0
+    allowed_tools_seen: list[object] = []
+
+    async def always_call_tool(**_kwargs: Any) -> AsyncStreamEvents:
+        nonlocal calls
+        calls += 1
+        allowed_tools_seen.append(_kwargs["allowed_tools"])
+
+        async def iterator() -> AsyncIterator[StreamEvent]:
+            yield StreamEvent("final", {"ok": True, "tool_calls": [{"id": f"call-{calls}"}]})
+
+        return AsyncStreamEvents(iterator())
+
+    agent._run_once = always_call_tool  # type: ignore[method-assign]
+    stream = await agent.run_stream(
+        session_id="user/s1",
+        prompt="inspect image",
+        state={"_runtime_workspace": "/tmp", "_runtime_max_steps": 2},  # noqa: S108
+    )
+
+    with pytest.raises(RuntimeError, match="max_steps_reached=2"):
+        [event async for event in stream]
+
+    assert calls == 2
+    assert allowed_tools_seen == [None, None]
 
 
 @pytest.mark.asyncio

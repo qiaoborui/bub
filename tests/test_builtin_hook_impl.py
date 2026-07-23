@@ -170,6 +170,8 @@ async def test_load_state_routes_image_message_to_vision_model(tmp_path: Path) -
     state = await impl.load_state(message=message, session_id="resolved-session")
 
     assert state["model"] == "openai:gpt-5.4-mini"
+    assert state["_runtime_max_steps"] == 6
+    assert "_runtime_allowed_tools" not in state
 
 
 @pytest.mark.asyncio

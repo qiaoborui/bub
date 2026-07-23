@@ -272,6 +272,8 @@ async def test_build_prompt_returns_multimodal_parts_with_image_media(tmp_path: 
     text_part = result[0]
     assert text_part["type"] == "text"
     assert "describe this" in text_part["text"]
+    assert "directly visible" in text_part["text"]
+    assert "Do not install OCR" in text_part["text"]
 
     image_part = result[1]
     assert image_part["type"] == "image_url"

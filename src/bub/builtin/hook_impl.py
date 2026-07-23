@@ -24,6 +24,13 @@ from bub.tape import TapeContext, TapeStore
 from bub.turn import TurnState
 
 AGENTS_FILE_NAME = "AGENTS.md"
+IMAGE_TURN_MAX_STEPS = 6
+IMAGE_VISION_GUIDANCE = (
+    "The attached image is directly visible to the current model. Analyze it with native vision first. "
+    "Use tools only when the request requires external data or actions. Do not install OCR or image-processing "
+    "software. When the image has no caption, briefly describe its visible content and ask what the user wants "
+    "to know."
+)
 MODEL_PROVIDER_CHOICES: tuple[str, ...] = (
     "openrouter",
     "openai",
@@ -158,6 +165,7 @@ class BuiltinImpl:
             vision_model := self._get_agent().settings.vision_model
         ):
             state["model"] = vision_model
+            state["_runtime_max_steps"] = IMAGE_TURN_MAX_STEPS
         if thread_id := field_of(message, "context", {}).get("thread_id"):
             state["_runtime_thread_id"] = thread_id
         return state
@@ -198,7 +206,7 @@ class BuiltinImpl:
                 case _:
                     pass  # TODO: Not supported for now
         if media_parts:
-            return [{"type": "text", "text": text}, *media_parts]
+            return [{"type": "text", "text": f"{IMAGE_VISION_GUIDANCE}\n{text}"}, *media_parts]
         return text
 
     @hookimpl
