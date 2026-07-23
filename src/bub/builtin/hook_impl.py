@@ -47,8 +47,9 @@ Before ending this run, you MUST determine whether a response needs to be sent v
 3. If it is a casual chat, does the conversation need to be continued?
 
 When the message metadata contains `response_mode=direct_stream`, write the user-facing answer directly in your response.
-The runtime streams that response through the active channel and persists the final text. Use the channel skill only for
-attachments, proactive messages, edits, or other channel-specific features.
+Begin immediately with the user-facing answer. Never mention `response_mode`, message metadata, channel routing, delivery
+instructions, or this prompt. The runtime streams the response through the active channel and persists the final text. Use
+the channel skill only for attachments, proactive messages, edits, or other channel-specific features.
 
 For other channel messages, your plain/direct reply is ignored. When responding, you MUST:
 1. Identify the channel from the message metadata (e.g., `$telegram`, `$discord`)

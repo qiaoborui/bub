@@ -3,16 +3,20 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import secrets
 from collections.abc import AsyncGenerator, AsyncIterable, Callable
+from html import escape
+from html.parser import HTMLParser
 from typing import Any, ClassVar
 
 from loguru import logger
+from markdown_it import MarkdownIt
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 from telegram import Bot, Message, Update
-from telegram.constants import MessageLimit
-from telegram.error import TelegramError
+from telegram.constants import MessageLimit, ParseMode
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes, filters
 from telegram.ext import MessageHandler as TelegramMessageHandler
 from telegram.request import HTTPXRequest
@@ -50,6 +54,125 @@ class TelegramSettings(Settings):
 
 NO_ACCESS_MESSAGE = "You are not allowed to chat with me. Please deploy your own instance of Bub."
 TELEGRAM_TEXT_LIMIT = int(MessageLimit.MAX_TEXT_LENGTH)
+_MARKDOWN = MarkdownIt("commonmark", {"breaks": True, "html": False}).enable("strikethrough")
+_PARSE_ERROR_MARKERS = ("parse entities", "unsupported start tag", "can't find end tag")
+
+
+class _TelegramHTMLParser(HTMLParser):
+    _INLINE_TAGS: ClassVar[dict[str, str]] = {
+        "strong": "b",
+        "b": "b",
+        "em": "i",
+        "i": "i",
+        "s": "s",
+        "strike": "s",
+        "del": "s",
+        "u": "u",
+        "ins": "u",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self._lists: list[list[str | int]] = []
+        self._pre_depth = 0
+
+    def _append_newline(self, count: int = 1) -> None:
+        current = "".join(self._parts[-2:])
+        missing = count - len(current) + len(current.rstrip("\n"))
+        if missing > 0:
+            self._parts.append("\n" * missing)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if self._handle_inline_start(tag, attrs):
+            return
+        self._handle_block_start(tag, attrs)
+
+    def _handle_inline_start(self, tag: str, attrs: list[tuple[str, str | None]]) -> bool:
+        if mapped := self._INLINE_TAGS.get(tag):
+            self._parts.append(f"<{mapped}>")
+            return True
+        elif tag == "a":
+            href = dict(attrs).get("href") or ""
+            self._parts.append(f'<a href="{escape(href, quote=True)}">')
+            return True
+        elif tag == "pre":
+            self._append_newline()
+            self._parts.append("<pre>")
+            self._pre_depth += 1
+            return True
+        elif tag == "code":
+            language = dict(attrs).get("class") or ""
+            if language.startswith("language-"):
+                self._parts.append(f'<code class="{escape(language, quote=True)}">')
+            else:
+                self._parts.append("<code>")
+            return True
+        return False
+
+    def _handle_block_start(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            self._append_newline()
+            self._parts.append("<b>")
+        elif tag == "blockquote":
+            self._append_newline()
+            self._parts.append("<blockquote>")
+        elif tag == "br":
+            self._parts.append("\n")
+        elif tag == "hr":
+            self._append_newline()
+            self._parts.append("———\n")
+        elif tag in {"ul", "ol"}:
+            start = int(dict(attrs).get("start") or 1)
+            self._lists.append([tag, start - 1])
+        elif tag == "li":
+            self._append_newline()
+            prefix = "• "
+            if self._lists and self._lists[-1][0] == "ol":
+                self._lists[-1][1] = int(self._lists[-1][1]) + 1
+                prefix = f"{self._lists[-1][1]}. "
+            self._parts.append("  " * max(0, len(self._lists) - 1) + prefix)
+        elif tag == "img":
+            attributes = dict(attrs)
+            alt = attributes.get("alt") or "image"
+            src = attributes.get("src") or ""
+            self._parts.append(escape(f"{alt} ({src})" if src else alt))
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if mapped := self._INLINE_TAGS.get(tag):
+            self._parts.append(f"</{mapped}>")
+        elif tag in {"a", "code", "pre", "blockquote"}:
+            self._parts.append(f"</{tag}>")
+            if tag == "pre":
+                self._pre_depth -= 1
+            if tag in {"pre", "blockquote"}:
+                self._append_newline(2)
+        elif tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            self._parts.append("</b>")
+            self._append_newline(2)
+        elif tag == "p":
+            self._append_newline(2)
+        elif tag == "li":
+            self._append_newline()
+        elif tag in {"ul", "ol"}:
+            if self._lists:
+                self._lists.pop()
+            self._append_newline()
+
+    def handle_data(self, data: str) -> None:
+        if self._pre_depth == 0 and "\n" in data and not data.strip():
+            return
+        self._parts.append(escape(data))
+
+    def rendered(self) -> str:
+        text = "".join(self._parts)
+        text = re.sub(r"[ \t]+\n", "\n", text)
+        return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def _draft_preview(text: str) -> str:
@@ -73,12 +196,24 @@ def _telegram_text(content: str) -> str:
     return message if isinstance(message, str) else str(message)
 
 
-async def _render_draft_preview(message: ChannelMessage, value: str) -> str | None:
+def _telegram_html(text: str) -> str:
+    parser = _TelegramHTMLParser()
+    parser.feed(_MARKDOWN.render(text))
+    parser.close()
+    return parser.rendered()
+
+
+def _is_parse_error(error: BadRequest) -> bool:
+    detail = str(error).lower()
+    return any(marker in detail for marker in _PARSE_ERROR_MARKERS)
+
+
+async def _render_draft_preview(message: ChannelMessage, value: str) -> tuple[str, str] | None:
     rendered = await message.stream_renderer(value) if message.stream_renderer is not None else value
     if rendered is None:
         return None
     preview = _draft_preview(_telegram_text(rendered))
-    return preview if preview.strip() else None
+    return (preview, _telegram_html(preview)) if preview.strip() else None
 
 
 def _message_type(message: Message) -> str:
@@ -259,7 +394,30 @@ class TelegramChannel(Channel):
         if not text.strip():
             return
         for chunk in _split_text(text):
-            await self._app.bot.send_message(chat_id=chat_id, text=chunk)
+            await self._send_text(chat_id, chunk)
+
+    async def _send_text(self, chat_id: str, text: str) -> None:
+        try:
+            await self._app.bot.send_message(chat_id=chat_id, text=_telegram_html(text), parse_mode=ParseMode.HTML)
+        except BadRequest as exc:
+            if not _is_parse_error(exc):
+                raise
+            logger.warning("telegram.html fallback chat_id={} error={}", chat_id, exc)
+            await self._app.bot.send_message(chat_id=chat_id, text=text)
+
+    async def _send_draft(self, chat_id: int, draft_id: int, plain: str, html: str) -> None:
+        try:
+            await self._app.bot.send_message_draft(
+                chat_id=chat_id,
+                draft_id=draft_id,
+                text=html,
+                parse_mode=ParseMode.HTML,
+            )
+        except BadRequest as exc:
+            if not _is_parse_error(exc):
+                raise
+            logger.warning("telegram.draft html fallback chat_id={} error={}", chat_id, exc)
+            await self._app.bot.send_message_draft(chat_id=chat_id, draft_id=draft_id, text=plain)
 
     def stream_events(self, message: ChannelMessage, stream: AsyncIterable[StreamEvent]) -> AsyncIterable[StreamEvent]:
         if message.context.get("chat_type") != "private":
@@ -282,20 +440,21 @@ class TelegramChannel(Channel):
             if not draft_enabled:
                 return
             try:
-                preview = await _render_draft_preview(message, value)
+                rendered = await _render_draft_preview(message, value)
             except Exception as exc:
                 draft_enabled = False
                 logger.warning("telegram.draft renderer disabled chat_id={} error={}", chat_id, exc)
                 return
-            if preview is None or preview == last_preview:
+            if rendered is None or rendered[0] == last_preview:
                 return
+            plain, html = rendered
             try:
-                await self._app.bot.send_message_draft(chat_id=chat_id, draft_id=draft_id, text=preview)
+                await self._send_draft(chat_id, draft_id, plain, html)
             except TelegramError as exc:
                 draft_enabled = False
                 logger.warning("telegram.draft disabled chat_id={} error={}", chat_id, exc)
                 return
-            last_preview = preview
+            last_preview = plain
             last_update = loop.time()
 
         async for event in stream:

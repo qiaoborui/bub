@@ -16,7 +16,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from telegram.constants import ParseMode
+from telegram.error import BadRequest
 
+from bub.builtin.hook_impl import DEFAULT_SYSTEM_PROMPT
 from bub.builtin.steering import InMemorySteeringInbox
 from bub.channels.admission import AdmitDecision, SessionTurnController, TurnSnapshot
 from bub.channels.base import Channel, Interface, Lifecycle
@@ -30,6 +33,11 @@ from bub.streaming import StreamEvent
 from bub.turn import TurnResult
 
 ANSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[()][A-Za-z])")
+
+
+def test_direct_stream_prompt_forbids_delivery_metadata_leaks() -> None:
+    assert "Begin immediately with the user-facing answer" in DEFAULT_SYSTEM_PROMPT
+    assert "Never mention `response_mode`" in DEFAULT_SYSTEM_PROMPT
 
 
 def _load_channel_config(
@@ -1190,18 +1198,42 @@ def test_bub_message_filter_accepts_group_mention() -> None:
 async def test_telegram_channel_send_extracts_json_message_and_skips_blank(load_config) -> None:
     _load_channel_config(load_config, telegram_value="test-token")
     channel = TelegramChannel(lambda message: None)
-    sent: list[tuple[str, str]] = []
+    sent: list[tuple[str, str, str | None]] = []
 
-    async def send_message(chat_id: str, text: str) -> None:
-        sent.append((chat_id, text))
+    async def send_message(chat_id: str, text: str, parse_mode: str | None = None) -> None:
+        sent.append((chat_id, text, parse_mode))
 
     channel._app = SimpleNamespace(bot=SimpleNamespace(send_message=send_message))
 
     await channel.send(_message('{"message":"hello"}', chat_id="42"))
     await channel.send(_message("   ", chat_id="42"))
     await channel.send(_message("x" * 4097, chat_id="42"))
+    await channel.send(_message("**bold**\n- one\n- two", chat_id="42"))
 
-    assert sent == [("42", "hello"), ("42", "x" * 4096), ("42", "x")]
+    assert sent == [
+        ("42", "hello", ParseMode.HTML),
+        ("42", "x" * 4096, ParseMode.HTML),
+        ("42", "x", ParseMode.HTML),
+        ("42", "<b>bold</b>\n\n• one\n• two", ParseMode.HTML),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_telegram_channel_renders_markdown_and_falls_back_to_plain_text(load_config) -> None:
+    _load_channel_config(load_config, telegram_value="test-token")
+    channel = TelegramChannel(lambda message: None)
+    sent: list[tuple[str, str | None]] = []
+
+    async def send_message(chat_id: str, text: str, parse_mode: str | None = None) -> None:
+        sent.append((text, parse_mode))
+        if parse_mode == ParseMode.HTML:
+            raise BadRequest("Can't parse entities")
+
+    channel._app = SimpleNamespace(bot=SimpleNamespace(send_message=send_message))
+
+    await channel.send(_message("**bold**", chat_id="42"))
+
+    assert sent == [("<b>bold</b>", ParseMode.HTML), ("**bold**", None)]
 
 
 @pytest.mark.asyncio
@@ -1209,10 +1241,10 @@ async def test_telegram_channel_streams_private_chat_with_message_drafts(load_co
     _load_channel_config(load_config, telegram_value="test-token")
     channel = TelegramChannel(lambda message: None)
     channel._settings.stream_update_interval = 0
-    drafts: list[tuple[int, int, str]] = []
+    drafts: list[tuple[int, int, str, str | None]] = []
 
-    async def send_message_draft(chat_id: int, draft_id: int, text: str) -> bool:
-        drafts.append((chat_id, draft_id, text))
+    async def send_message_draft(chat_id: int, draft_id: int, text: str, parse_mode: str | None = None) -> bool:
+        drafts.append((chat_id, draft_id, text, parse_mode))
         return True
 
     channel._app = SimpleNamespace(bot=SimpleNamespace(send_message_draft=send_message_draft))
@@ -1227,9 +1259,10 @@ async def test_telegram_channel_streams_private_chat_with_message_drafts(load_co
     yielded = [event async for event in channel.stream_events(message, source())]
 
     assert [event.kind for event in yielded] == ["text", "text", "final"]
-    assert [text for _, _, text in drafts] == ["hel", "hello"]
-    assert {chat_id for chat_id, _, _ in drafts} == {42}
-    assert len({draft_id for _, draft_id, _ in drafts}) == 1
+    assert [text for _, _, text, _ in drafts] == ["hel", "hello"]
+    assert {parse_mode for _, _, _, parse_mode in drafts} == {ParseMode.HTML}
+    assert {chat_id for chat_id, _, _, _ in drafts} == {42}
+    assert len({draft_id for _, draft_id, _, _ in drafts}) == 1
     assert drafts[0][1] > 0
 
 
@@ -1240,7 +1273,7 @@ async def test_telegram_channel_throttles_drafts_and_flushes_final_text(load_con
     channel._settings.stream_update_interval = 3600
     drafts: list[str] = []
 
-    async def send_message_draft(chat_id: int, draft_id: int, text: str) -> bool:
+    async def send_message_draft(chat_id: int, draft_id: int, text: str, parse_mode: str | None = None) -> bool:
         drafts.append(text)
         return True
 
@@ -1265,7 +1298,7 @@ async def test_telegram_channel_renders_drafts_through_outbound_policy(load_conf
     channel._settings.stream_update_interval = 0
     drafts: list[str] = []
 
-    async def send_message_draft(chat_id: int, draft_id: int, text: str) -> bool:
+    async def send_message_draft(chat_id: int, draft_id: int, text: str, parse_mode: str | None = None) -> bool:
         drafts.append(text)
         return True
 
@@ -1292,7 +1325,7 @@ async def test_telegram_channel_skips_drafts_suppressed_by_outbound_policy(load_
     channel = TelegramChannel(lambda message: None)
     drafts: list[str] = []
 
-    async def send_message_draft(chat_id: int, draft_id: int, text: str) -> bool:
+    async def send_message_draft(chat_id: int, draft_id: int, text: str, parse_mode: str | None = None) -> bool:
         drafts.append(text)
         return True
 
@@ -1320,7 +1353,7 @@ async def test_telegram_channel_preserves_stream_when_outbound_renderer_fails(lo
     channel = TelegramChannel(lambda message: None)
     drafts: list[str] = []
 
-    async def send_message_draft(chat_id: int, draft_id: int, text: str) -> bool:
+    async def send_message_draft(chat_id: int, draft_id: int, text: str, parse_mode: str | None = None) -> bool:
         drafts.append(text)
         return True
 
