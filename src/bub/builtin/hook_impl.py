@@ -154,10 +154,10 @@ class BuiltinImpl:
         if model := field_of(message, "context", {}).get("model"):
             state["model"] = model
         media = field_of(message, "media") or []
-        if any(field_of(item, "type") == "image" for item in media):
-            state["_runtime_allowed_tools"] = []
-            if vision_model := self._get_agent().settings.vision_model:
-                state["model"] = vision_model
+        if any(field_of(item, "type") == "image" for item in media) and (
+            vision_model := self._get_agent().settings.vision_model
+        ):
+            state["model"] = vision_model
         if thread_id := field_of(message, "context", {}).get("thread_id"):
             state["_runtime_thread_id"] = thread_id
         return state
