@@ -397,6 +397,23 @@ class TelegramChannel(Channel):
             await self._send_text(chat_id, chunk)
 
     async def _send_text(self, chat_id: str, text: str) -> None:
+        post = getattr(self._app.bot, "_post", None)
+        if post is not None:
+            try:
+                await post(
+                    "sendRichMessage",
+                    {
+                        "chat_id": chat_id,
+                        "rich_message": {"markdown": text, "skip_entity_detection": True},
+                    },
+                )
+            except BadRequest as exc:
+                logger.warning("telegram.rich_message fallback chat_id={} error={}", chat_id, exc)
+            else:
+                return
+        await self._send_html_text(chat_id, text)
+
+    async def _send_html_text(self, chat_id: str, text: str) -> None:
         try:
             await self._app.bot.send_message(chat_id=chat_id, text=_telegram_html(text), parse_mode=ParseMode.HTML)
         except BadRequest as exc:
@@ -406,6 +423,24 @@ class TelegramChannel(Channel):
             await self._app.bot.send_message(chat_id=chat_id, text=text)
 
     async def _send_draft(self, chat_id: int, draft_id: int, plain: str, html: str) -> None:
+        post = getattr(self._app.bot, "_post", None)
+        if post is not None:
+            try:
+                await post(
+                    "sendRichMessageDraft",
+                    {
+                        "chat_id": chat_id,
+                        "draft_id": draft_id,
+                        "rich_message": {"markdown": plain, "skip_entity_detection": True},
+                    },
+                )
+            except BadRequest as exc:
+                logger.warning("telegram.rich_draft fallback chat_id={} error={}", chat_id, exc)
+            else:
+                return
+        await self._send_html_draft(chat_id, draft_id, plain, html)
+
+    async def _send_html_draft(self, chat_id: int, draft_id: int, plain: str, html: str) -> None:
         try:
             await self._app.bot.send_message_draft(
                 chat_id=chat_id,

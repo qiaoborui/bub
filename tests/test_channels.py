@@ -1237,6 +1237,37 @@ async def test_telegram_channel_renders_markdown_and_falls_back_to_plain_text(lo
 
 
 @pytest.mark.asyncio
+async def test_telegram_channel_sends_tables_as_native_rich_markdown(load_config) -> None:
+    _load_channel_config(load_config, telegram_value="test-token")
+    channel = TelegramChannel(lambda message: None)
+    rich_calls: list[tuple[str, dict]] = []
+    legacy_calls: list[str] = []
+
+    async def post(endpoint: str, data: dict) -> dict:
+        rich_calls.append((endpoint, data))
+        return {"message_id": 1}
+
+    async def send_message(chat_id: str, text: str, parse_mode: str | None = None) -> None:
+        legacy_calls.append(text)
+
+    channel._app = SimpleNamespace(bot=SimpleNamespace(_post=post, send_message=send_message))
+    table = "| 日期 | 金额 |\n|:---|---:|\n| 7/20 | ¥11.40 |"
+
+    await channel.send(_message(table, chat_id="42"))
+
+    assert rich_calls == [
+        (
+            "sendRichMessage",
+            {
+                "chat_id": "42",
+                "rich_message": {"markdown": table, "skip_entity_detection": True},
+            },
+        )
+    ]
+    assert legacy_calls == []
+
+
+@pytest.mark.asyncio
 async def test_telegram_channel_streams_private_chat_with_message_drafts(load_config) -> None:
     _load_channel_config(load_config, telegram_value="test-token")
     channel = TelegramChannel(lambda message: None)
@@ -1264,6 +1295,42 @@ async def test_telegram_channel_streams_private_chat_with_message_drafts(load_co
     assert {chat_id for chat_id, _, _, _ in drafts} == {42}
     assert len({draft_id for _, draft_id, _, _ in drafts}) == 1
     assert drafts[0][1] > 0
+
+
+@pytest.mark.asyncio
+async def test_telegram_channel_streams_tables_as_native_rich_markdown_drafts(load_config) -> None:
+    _load_channel_config(load_config, telegram_value="test-token")
+    channel = TelegramChannel(lambda message: None)
+    channel._settings.stream_update_interval = 0
+    rich_calls: list[tuple[str, dict]] = []
+    legacy_calls: list[str] = []
+
+    async def post(endpoint: str, data: dict) -> bool:
+        rich_calls.append((endpoint, data))
+        return True
+
+    async def send_message_draft(chat_id: int, draft_id: int, text: str, parse_mode: str | None = None) -> bool:
+        legacy_calls.append(text)
+        return True
+
+    channel._app = SimpleNamespace(bot=SimpleNamespace(_post=post, send_message_draft=send_message_draft))
+    message = _message("ignored", chat_id="42")
+    message.context["chat_type"] = "private"
+    table = "| 日期 | 金额 |\n|:---|---:|\n| 7/20 | ¥11.40 |"
+
+    async def source():
+        yield StreamEvent("text", {"delta": table})
+        yield StreamEvent("final", {"text": table})
+
+    _ = [event async for event in channel.stream_events(message, source())]
+
+    assert len(rich_calls) == 1
+    endpoint, data = rich_calls[0]
+    assert endpoint == "sendRichMessageDraft"
+    assert data["chat_id"] == 42
+    assert data["draft_id"] > 0
+    assert data["rich_message"] == {"markdown": table, "skip_entity_detection": True}
+    assert legacy_calls == []
 
 
 @pytest.mark.asyncio
